@@ -1,0 +1,255 @@
+//
+//  SessionStore.swift
+//  MeasureSDK
+//
+//  Created by Adwin Ross on 22/09/24.
+//
+
+import CoreData
+import Foundation
+
+protocol SessionStore {
+    func insertSession(_ session: SessionEntity)
+    func getSession(byId sessionId: String) -> SessionEntity?
+    func markCrashedSession(sessionId: String)
+    func updateNeedsReporting(sessionId: String, needsReporting: Bool)
+    func getOldestSession() -> String?
+    func deleteSessions(_ sessionIds: [String])
+    func getSessionsToDelete() -> [String]?
+    func getPrioritySessionIds() -> [String]
+    func getAllSessions() -> [SessionEntity]
+}
+
+final class BaseSessionStore: SessionStore {
+    private let coreDataManager: CoreDataManager
+    private let logger: Logger
+
+    init(coreDataManager: CoreDataManager, logger: Logger) {
+        self.coreDataManager = coreDataManager
+        self.logger = logger
+    }
+
+    func insertSession(_ session: SessionEntity) {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return
+        }
+
+        context.performAndWait {
+            let sessionOb = SessionOb(context: context)
+            sessionOb.sessionId = session.sessionId
+            sessionOb.pid = session.pid
+            sessionOb.createdAt = session.createdAt
+            sessionOb.needsReporting = session.needsReporting
+            sessionOb.crashed = session.crashed
+
+            do {
+                try context.saveIfNeeded()
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to save session: \(session.sessionId)", error: error, data: nil)
+            }
+        }
+    }
+
+    func getSession(byId sessionId: String) -> SessionEntity? {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return nil
+        }
+
+        var result: SessionEntity?
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.fetchLimit = 1
+            fetchRequest.predicate = NSPredicate(format: "sessionId == %@", sessionId)
+
+            do {
+                if let sessionOb = try context.fetch(fetchRequest).first {
+                    result = SessionEntity(
+                        sessionId: sessionOb.sessionId ?? "",
+                        pid: sessionOb.pid,
+                        createdAt: sessionOb.createdAt,
+                        needsReporting: sessionOb.needsReporting,
+                        crashed: sessionOb.crashed
+                    )
+                }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to fetch session: \(sessionId)", error: error, data: nil)
+                result = nil
+            }
+        }
+
+        return result
+    }
+
+    func markCrashedSession(sessionId: String) {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return
+        }
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.fetchLimit = 1
+            fetchRequest.predicate = NSPredicate(format: "sessionId == %@", sessionId)
+
+            do {
+                if let session = try context.fetch(fetchRequest).first {
+                    session.crashed = true
+                    try context.saveIfNeeded()
+                }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to mark crashed session: \(sessionId)", error: error, data: nil)
+            }
+        }
+    }
+
+    func updateNeedsReporting(sessionId: String, needsReporting: Bool) {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return
+        }
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.fetchLimit = 1
+            fetchRequest.predicate = NSPredicate(format: "sessionId == %@", sessionId)
+
+            do {
+                if let session = try context.fetch(fetchRequest).first {
+                    session.needsReporting = needsReporting
+                    try context.saveIfNeeded()
+                }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to update needsReporting for session: \(sessionId)", error: error, data: nil)
+            }
+        }
+    }
+
+    func getOldestSession() -> String? {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return nil
+        }
+
+        var sessionId: String?
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.fetchLimit = 1
+            fetchRequest.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+
+            do {
+                sessionId = try context.fetch(fetchRequest).first?.sessionId
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to fetch oldest session.", error: error, data: nil)
+                sessionId = nil
+            }
+        }
+
+        return sessionId
+    }
+
+    func deleteSessions(_ sessionIds: [String]) {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return
+        }
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.fetchLimit = sessionIds.count
+            fetchRequest.predicate = NSPredicate(format: "sessionId IN %@", sessionIds)
+
+            do {
+                let sessions = try context.fetch(fetchRequest)
+                sessions.forEach { context.delete($0) }
+                try context.saveIfNeeded()
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to delete sessions: \(sessionIds.joined(separator: ","))", error: error, data: nil)
+            }
+        }
+    }
+
+    func getSessionsToDelete() -> [String]? {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return nil
+        }
+
+        var sessionIds: [String]?
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.predicate = NSPredicate(format: "needsReporting == %d", false)
+
+            do {
+                let sessions = try context.fetch(fetchRequest)
+                sessionIds = sessions.compactMap { $0.sessionId }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to fetch sessions to delete.", error: error, data: nil)
+                sessionIds = nil
+            }
+        }
+
+        return sessionIds
+    }
+
+    func getPrioritySessionIds() -> [String] {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return []
+        }
+
+        var sessionIds: [String] = []
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+            fetchRequest.predicate = NSPredicate(format: "needsReporting == %d", true)
+            fetchRequest.sortDescriptors = [
+                NSSortDescriptor(key: "createdAt", ascending: true)
+            ]
+
+            do {
+                let sessions = try context.fetch(fetchRequest)
+                sessionIds = sessions.compactMap { $0.sessionId }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to fetch priority sessions", error: error, data: nil)
+            }
+        }
+
+        return sessionIds
+    }
+
+    func getAllSessions() -> [SessionEntity] {
+        guard let context = coreDataManager.backgroundContext else {
+            logger.internalLog(level: .error, message: "SessionStore: Background context not available", error: nil, data: nil)
+            return []
+        }
+
+        var result: [SessionEntity] = []
+
+        context.performAndWait {
+            let fetchRequest: NSFetchRequest<SessionOb> = SessionOb.fetchRequest()
+
+            do {
+                let sessions = try context.fetch(fetchRequest)
+                result = sessions.map {
+                    SessionEntity(
+                        sessionId: $0.sessionId ?? "",
+                        pid: $0.pid,
+                        createdAt: $0.createdAt,
+                        needsReporting: $0.needsReporting,
+                        crashed: $0.crashed
+                    )
+                }
+            } catch {
+                logger.internalLog(level: .error, message: "SessionStore: Failed to fetch all sessions", error: error, data: nil)
+                result = []
+            }
+        }
+
+        return result
+    }
+}

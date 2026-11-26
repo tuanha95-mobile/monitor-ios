@@ -1,0 +1,90 @@
+//
+//  MockSignalProcessor.swift
+//  MeasureSDKTests
+//
+//  Created by Adwin Ross on 26/09/24.
+//
+
+import Foundation
+@testable import Measure
+
+final class MockSignalProcessor: SignalProcessor {
+    var attachments: [MsrAttachment]?
+    var sessionId: String?
+    var data: Codable?
+    var timestamp: Number?
+    var type: EventType?
+    var attributes: Attributes?
+    var userDefinedAttributes: String?
+    var spanData: SpanData?
+    var needsReporting: Bool?
+    var trackSpanCallCount = 0
+    var trackEventCallCount = 0
+    var synchronous: Bool?
+    var trackedAppHang: AppHang?
+    var trackedAppHangTimestamp: Number?
+    var trackedAppHangSessionId: String?
+    var trackedAppHangEventId: String?
+    var trackAppHangCallCount = 0
+
+    func track<T>(data: T, // swiftlint:disable:this function_parameter_count
+                  timestamp: Number,
+                  type: EventType,
+                  attributes: Attributes?,
+                  sessionId: String?,
+                  attachments: [MsrAttachment]?,
+                  userDefinedAttributes: String? = nil,
+                  threadName: String? = nil,
+                  needsReporting: Bool? = nil,
+                  synchronous: Bool) where T: Codable {
+        self.data = data
+        self.timestamp = timestamp
+        self.type = type
+        self.attributes = attributes
+        self.sessionId = sessionId
+        self.attachments = attachments
+        self.userDefinedAttributes = userDefinedAttributes
+        self.needsReporting = needsReporting
+        self.synchronous = synchronous
+        trackEventCallCount += 1
+    }
+
+    func trackUserTriggered<T>(data: T,  // swiftlint:disable:this function_parameter_count
+                               timestamp: Number,
+                               type: EventType,
+                               attributes: Attributes?,
+                               sessionId: String?,
+                               attachments: [MsrAttachment]?,
+                               userDefinedAttributes: String?,
+                               threadName: String?,
+                               needsReporting: Bool?) where T: Codable {
+        self.data = data
+        self.timestamp = timestamp
+        self.type = type
+        self.attributes = attributes
+        self.sessionId = sessionId
+        self.attachments = attachments
+        self.userDefinedAttributes = userDefinedAttributes
+        self.needsReporting = needsReporting
+    }
+
+    var trackedAppHangNeedsReporting: Bool?
+
+    func trackAppHang(_ appHang: AppHang, timestamp: Number, attributes: Attributes?, sessionId: String?, needsReporting: Bool) -> String {
+        trackAppHangCallCount += 1
+        trackedAppHang = appHang
+        trackedAppHangTimestamp = timestamp
+        trackedAppHangSessionId = sessionId
+        trackedAppHangNeedsReporting = needsReporting
+        self.attributes = attributes
+
+        let eventId = UUID().uuidString
+        trackedAppHangEventId = eventId
+        return eventId
+    }
+
+    func trackSpan(_ spanData: SpanData) {
+        trackSpanCallCount += 1
+        self.spanData = spanData
+    }
+}

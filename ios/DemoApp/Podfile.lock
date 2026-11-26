@@ -1,0 +1,48 @@
+PODS:
+  - KSCrash (2.6.0):
+    - KSCrash/Installations (= 2.6.0)
+  - KSCrash/Core (2.6.0)
+  - KSCrash/DemangleFilter (2.6.0):
+    - KSCrash/Recording
+  - KSCrash/Filters (2.6.0):
+    - KSCrash/Recording
+    - KSCrash/RecordingCore
+    - KSCrash/ReportingCore
+  - KSCrash/Installations (2.6.0):
+    - KSCrash/DemangleFilter
+    - KSCrash/Filters
+    - KSCrash/Recording
+    - KSCrash/Sinks
+  - KSCrash/Recording (2.6.0):
+    - KSCrash/RecordingCore
+  - KSCrash/RecordingCore (2.6.0):
+    - KSCrash/Core
+  - KSCrash/ReportingCore (2.6.0):
+    - KSCrash/Core
+  - KSCrash/Sinks (2.6.0):
+    - KSCrash/Filters
+    - KSCrash/Recording
+  - measure-sh (0.14.1):
+    - KSCrash (~> 2.5)
+    - measure-sh/WebP (= 0.14.1)
+  - measure-sh/WebP (0.14.1):
+    - KSCrash (~> 2.5)
+
+DEPENDENCIES:
+  - measure-sh (from `../../`)
+
+SPEC REPOS:
+  trunk:
+    - KSCrash
+
+EXTERNAL SOURCES:
+  measure-sh:
+    :path: "../../"
+
+SPEC CHECKSUMS:
+  KSCrash: 8515730b020ffc714bb10406a3bd289b28a81c6f
+  measure-sh: fca1ed3014c59a3cbe1aacdd9fb68ab072c42768
+
+PODFILE CHECKSUM: 828d9701ce9dd588cdabe7bc1a8cb829d2a17f97
+
+COCOAPODS: 1.16.2

@@ -1,0 +1,178 @@
+//
+//  BugReportManager.swift
+//  Measure
+//
+//  Created by Adwin Ross on 05/05/25.
+//
+
+import Foundation
+import UIKit
+
+protocol BugReportManager {
+    func setBugReportConfig(_ bugReportConfig: BugReportConfig)
+    func openBugReporter(_ attachments: [MsrAttachment], takeScreenshot: Bool)
+    func setBugReportCollector(_ collector: BaseBugReportCollector)
+}
+
+final class BaseBugReportManager: BugReportManager {
+    private var bugReportingViewController: BugReportingViewController?
+    private var floatingButtonViewController: FloatingButtonViewController?
+    private let screenshotGenerator: ScreenshotGenerator
+    private var localAttachments: [MsrAttachment] = []
+    private var isBugReporterOpen: Bool = false
+    private let configProvider: ConfigProvider
+    private let idProvider: IdProvider
+    private let systemFileManager: SystemFileManager
+    private var bugReportConfig: BugReportConfig?
+    private weak var bugReportCollector: BaseBugReportCollector?
+    private var hasBugReportFlowStarted = false
+    private var description: String?
+
+    init(screenshotGenerator: ScreenshotGenerator,
+         configProvider: ConfigProvider,
+         idProvider: IdProvider,
+         systemFileManager: SystemFileManager) {
+        self.screenshotGenerator = screenshotGenerator
+        self.configProvider = configProvider
+        self.idProvider = idProvider
+        self.systemFileManager = systemFileManager
+    }
+
+    func setBugReportCollector(_ collector: BaseBugReportCollector) {
+        self.bugReportCollector = collector
+    }
+
+    func setBugReportConfig(_ bugReportConfig: BugReportConfig) {
+        self.bugReportConfig = bugReportConfig
+    }
+
+    func openBugReporter(_ attachments: [MsrAttachment], takeScreenshot: Bool) {
+        if self.bugReportingViewController != nil || self.isBugReporterOpen || self.hasBugReportFlowStarted {
+            return
+        }
+
+        self.hasBugReportFlowStarted = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            let finishOpening = {
+                self.openBugReportViewController()
+            }
+
+            if takeScreenshot,
+               let window = UIWindow.keyWindow() {
+                var hasOpened = false
+                var redactedImage: UIImage?
+                screenshotGenerator.generate(
+                    window: window,
+                    name: screenshotName,
+                    storageType: .data,
+                    sync: false,
+                    onRedactedImage: { image in
+                        redactedImage = image
+                        guard !hasOpened else { return }
+                        hasOpened = true
+                        finishOpening()
+                    },
+                    completion: { attachment in
+                        if let attachment = attachment {
+                            self.localAttachments.append(attachment)
+                            self.bugReportingViewController?.addAttachment(attachment, previewImage: redactedImage)
+                        }
+                        if !hasOpened {
+                            hasOpened = true
+                            finishOpening()
+                        }
+                    }
+                )
+            } else {
+                finishOpening()
+            }
+        }
+    }
+
+    private func openBugReportViewController() {
+        guard let root = UIWindow.keyWindow()?.rootViewController else {
+            clearState()
+            return
+        }
+
+        let bugVC = BugReportingViewController(description: description,
+                                               attachments: self.localAttachments,
+                                               configProvider: configProvider,
+                                               bugReportConfig: bugReportConfig ?? BugReportConfig.default,
+                                               idProvider: idProvider,
+                                               systemFileManager: systemFileManager)
+        bugVC.modalPresentationStyle = .fullScreen
+        bugVC.delegate = self
+        self.bugReportingViewController = bugVC
+
+        var top = root
+        while let presented = top.presentedViewController {
+            top = presented
+        }
+        top.present(bugVC, animated: true) {
+            self.isBugReporterOpen = true
+        }
+    }
+
+    private func clearState(_ shouldClearAttachments: Bool = true) {
+        if shouldClearAttachments {
+            self.localAttachments.forEach { attachment in
+                if let path = attachment.path {
+                    systemFileManager.deleteFile(atPath: path)
+                }
+            }
+        }
+        self.localAttachments.removeAll()
+        self.description = nil
+        self.hasBugReportFlowStarted = false
+    }
+}
+
+extension BaseBugReportManager: BugReportingViewControllerDelegate {
+    func bugReportingViewControllerDidDismiss(_ description: String?, attachments: [MsrAttachment]?) {
+        self.bugReportingViewController = nil
+        self.isBugReporterOpen = false
+        guard let description, let attachments, let bugReportCollector else {
+            clearState()
+            return
+        }
+
+        bugReportCollector.trackBugReport(description: description, attachments: attachments, attributes: nil)
+        clearState(false)
+    }
+
+    func bugReportingViewControllerDidRequestScreenshot(_ description: String?, attachments: [MsrAttachment]) {
+        self.bugReportingViewController = nil
+        self.isBugReporterOpen = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.localAttachments = attachments
+            self.description = description
+
+            self.floatingButtonViewController = FloatingButtonViewController(screenshotGenerator: self.screenshotGenerator,
+                                                                             bugReportConfig: bugReportConfig ?? BugReportConfig.default,
+                                                                             attachments: self.localAttachments,
+                                                                             configProvider: configProvider,
+                                                                             systemFileManager: systemFileManager)
+            self.floatingButtonViewController?.delegate = self
+
+            if let window = UIWindow.keyWindow(), let view = self.floatingButtonViewController?.view {
+                self.floatingButtonViewController?.view.frame = window.bounds
+                window.addSubview(view)
+            }
+        }
+    }
+}
+
+extension BaseBugReportManager: FloatingButtonViewControllerDelegate {
+    func floatingButtonViewControllerDismissed(_ attachments: [MsrAttachment]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.localAttachments = attachments
+            self.openBugReportViewController()
+        }
+    }
+}

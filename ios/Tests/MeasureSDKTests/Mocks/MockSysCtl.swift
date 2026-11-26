@@ -1,0 +1,42 @@
+//
+//  MockSysCtl.swift
+//  MeasureSDKTests
+//
+//  Created by Adwin Ross on 11/11/24.
+//
+
+import Foundation
+@testable import Measure
+
+final class MockSysCtl: SysCtl {
+    var mockCpuCores: UInt8 = 0
+    var mockClockTicksPerSecond: UInt64 = 0
+    var mockMaximumAvailableRam: UnsignedNumber = 0
+    var processStartTime: UnsignedNumber = 0
+    var systemBootTime: UnsignedNumber = 0
+    var osBuildNumber: String?
+
+    func getCpuCores() -> UInt8 {
+        return mockCpuCores
+    }
+
+    func getClockTicksPerSecond() -> UInt64 {
+        return mockClockTicksPerSecond
+    }
+
+    func getMaximumAvailableRam() -> UnsignedNumber {
+        return mockMaximumAvailableRam
+    }
+
+    func getProcessStartTime() -> UnsignedNumber? {
+        return processStartTime
+    }
+
+    func getSystemBootTime() -> UnsignedNumber? {
+        return systemBootTime
+    }
+
+    func getOsBuildNumber() -> String? {
+        return osBuildNumber
+    }
+}

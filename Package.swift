@@ -1,0 +1,52 @@
+// swift-tools-version: 5.7
+import PackageDescription
+
+let package = Package(
+    name: "Measure",
+    platforms: [
+        .iOS(.v13)
+    ],
+    products: [
+        .library(
+            name: "Measure",
+            targets: ["Measure"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/kstenerud/KSCrash.git", from: "2.5.1")
+    ],
+    targets: [
+        .target(
+            name: "Measure",
+            dependencies: [
+                .product(name: "Recording", package: "KSCrash"),
+            ],
+            path: "ios/Sources/MeasureSDK/Swift",
+            resources: [
+                .process("XCDataModel/MeasureModel.xcdatamodeld"),
+                .process("XCDataModel/MeasureModelV1ToV2.xcmappingmodel"),
+                .copy("Resources/PrivacyInfo.xcprivacy")
+            ]
+        ),
+        .target(
+            name: "MeasureObjC",
+            dependencies: [
+                "Measure"
+            ],
+            path: "ios/Sources/MeasureSDK/ObjC",
+            publicHeadersPath: "include"
+        ),
+
+        // Tests
+        .testTarget(
+            name: "MeasureSDKTests",
+            dependencies: ["Measure"],
+            path: "ios/Tests/MeasureSDKTests"
+        ),
+        .testTarget(
+            name: "MeasureUITests",
+            dependencies: ["Measure"],
+            path: "ios/Tests/MeasureUITests"
+        ),
+    ]
+)

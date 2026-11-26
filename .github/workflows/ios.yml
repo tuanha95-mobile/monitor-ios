@@ -1,0 +1,69 @@
+on:
+  pull_request:
+    paths:
+      - 'ios/**'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'ios/**'
+    tags:
+      - 'ios-*'
+
+jobs:
+  ios_lint_and_tests:
+    runs-on: macos-15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install SwiftLint
+        run: |
+          curl -sSL --retry 3 -o "${RUNNER_TEMP}/portable_swiftlint.zip" \
+            https://github.com/realm/SwiftLint/releases/latest/download/portable_swiftlint.zip
+          unzip -q -o "${RUNNER_TEMP}/portable_swiftlint.zip" -d "${RUNNER_TEMP}/swiftlint"
+          chmod +x "${RUNNER_TEMP}/swiftlint/swiftlint"
+          echo "${RUNNER_TEMP}/swiftlint" >> "$GITHUB_PATH"
+
+      - name: Run SwiftLint
+        working-directory: ios
+        run: |
+          swiftlint version
+          swiftlint lint --strict --reporter github-actions-logging
+
+      - name: Switch to Xcode 16.4
+        run: sudo xcode-select -switch /Applications/Xcode_16.4.app
+
+      - name: Confirm Xcode Version
+        run: xcodebuild -version
+
+      - name: Show Available Simulators
+        run: xcrun simctl list devices
+
+      - name: Clean Derived Data
+        run: rm -rf ~/Library/Developer/Xcode/DerivedData
+
+      - name: Build Measure SDK
+        run: |
+          xcodebuild build \
+            -project ios/MeasureSDK.xcodeproj \
+            -scheme Measure \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' \
+            ONLY_ACTIVE_ARCH=YES \
+            SKIP_TESTING=YES
+
+      - name: Run Unit Tests
+        run: |
+          xcodebuild test \
+            -project ios/MeasureSDK.xcodeproj \
+            -scheme MeasureSDKTests \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2' \
+            ONLY_ACTIVE_ARCH=YES \
+            -parallel-testing-enabled NO

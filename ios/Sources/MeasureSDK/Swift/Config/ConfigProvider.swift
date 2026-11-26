@@ -1,0 +1,309 @@
+//
+//  ConfigProvider.swift
+//  MeasureSDK
+//
+//  Created by Adwin Ross on 25/08/24.
+//
+
+import Foundation
+
+/// Configuration Provider for the Measure SDK. See `BaseConfigProvider` for details.
+protocol ConfigProvider: MeasureConfig, InternalConfig, DynamicConfig {
+    func shouldTrackHttpBody(url: String, contentType: String?) -> Bool
+    func shouldTrackHttpUrl(url: String) -> Bool
+    func shouldTrackHttpHeader(key: String) -> Bool
+
+    /// Whether a log with the given body should be dropped because it matches one of the
+    /// configured `logIgnorePatterns` patterns.
+    func shouldDiscardLog(body: String) -> Bool
+
+    /// Sets the measure URL so that it can be added to the httpUrlBlocklist. Required as it can be any
+    /// URL when the SDK is running in self-hosted mode.
+    /// - Parameter url: The base URL of the Measure service.
+    func setMeasureUrl(url: String)
+
+    /// Updates the dynamic configuration at runtime.
+    func setDynamicConfig(_ config: DynamicConfig)
+}
+
+/// A configuration provider for the Measure SDK.
+///
+/// The `BaseConfigProvider` class is responsible for managing and providing configuration settings
+/// for the Measure SDK. It follows a priority hierarchy to determine the most up-to-date configuration:
+///
+/// Network Configuration: If a network configuration is available, it takes precedence and is used.
+/// Cached Configuration: If no network configuration is available, the cached configuration is used.
+/// Default Configuration: If neither network nor cached configurations are available, the default configuration is applied.
+/// 
+final class BaseConfigProvider: ConfigProvider {
+    private struct HttpPatternState {
+        let disableEventPatterns: [NSRegularExpression]
+        let blocklistPatterns: [NSRegularExpression]
+        let trackRequestPatterns: [NSRegularExpression]
+        let trackResponsePatterns: [NSRegularExpression]
+        let blockedHeaders: [String]
+        let measureUrl: String?
+    }
+    private let defaultConfig: Config
+    private let lockQueue = DispatchQueue(label: "sh.measure.config-provider")
+    private var dynamicConfig: DynamicConfig = BaseDynamicConfig()
+    private var httpPatternState = HttpPatternState(
+        disableEventPatterns: [],
+        blocklistPatterns: [],
+        trackRequestPatterns: [],
+        trackResponsePatterns: [],
+        blockedHeaders: [],
+        measureUrl: nil
+    )
+    private var logIgnoreRegexes: [NSRegularExpression] = []
+
+    init(defaultConfig: Config) {
+        self.defaultConfig = defaultConfig
+    }
+
+    func setDynamicConfig(_ config: DynamicConfig) {
+        lockQueue.sync {
+            self.dynamicConfig = config
+
+            let measureUrl = self.httpPatternState.measureUrl
+
+            self.httpPatternState = HttpPatternState(
+                disableEventPatterns: self.buildDisableEventPatterns(
+                    configUrls: config.httpDisableEventForUrls,
+                    measureUrl: measureUrl
+                ),
+                blocklistPatterns: self.httpUrlBlocklist.map(self.compilePattern),
+                trackRequestPatterns: config.httpTrackRequestForUrls.map(self.compilePattern),
+                trackResponsePatterns: config.httpTrackResponseForUrls.map(self.compilePattern),
+                blockedHeaders: config.httpBlockedHeaders,
+                measureUrl: measureUrl
+            )
+            self.logIgnoreRegexes = config.logIgnorePatterns.compactMap(self.compileLogIgnorePattern)
+        }
+    }
+
+    // MeasureConfig
+
+    var enableLogging: Bool { defaultConfig.enableLogging }
+    var autoStart: Bool { defaultConfig.autoStart }
+    var enableFullCollectionMode: Bool { defaultConfig.enableFullCollectionMode }
+    var requestHeadersProvider: MsrRequestHeadersProvider? { defaultConfig.requestHeadersProvider }
+    var maxDiskUsageInMb: Number { defaultConfig.maxDiskUsageInMb }
+    var enableDiagnosticMode: Bool { defaultConfig.enableDiagnosticMode }
+    var enableDiagnosticModeGesture: Bool { defaultConfig.enableDiagnosticModeGesture }
+
+    // InternalConfig
+
+    var batchExportIntervalMs: Number { defaultConfig.batchExportIntervalMs }
+    var attachmentExportIntervalMs: Number { defaultConfig.attachmentExportIntervalMs }
+    var defaultHttpHeadersBlocklist: [String] { defaultConfig.defaultHttpHeadersBlocklist }
+    var sessionBackgroundTimeoutThresholdMs: Number { defaultConfig.sessionBackgroundTimeoutThresholdMs }
+    var maxEventNameLength: Number { defaultConfig.maxEventNameLength }
+    var maxLogBodyLength: Number { defaultConfig.maxLogBodyLength }
+    var maxUserDefinedAttributesPerEvent: Number { defaultConfig.maxUserDefinedAttributesPerEvent }
+    var customEventNameRegex: String { defaultConfig.customEventNameRegex }
+    var maxUserDefinedAttributeKeyLength: Number { defaultConfig.maxUserDefinedAttributeKeyLength }
+    var maxUserDefinedAttributeValueLength: Number { defaultConfig.maxUserDefinedAttributeValueLength }
+    var longPressTimeout: TimeInterval { defaultConfig.longPressTimeout }
+    var scaledTouchSlop: CGFloat { defaultConfig.scaledTouchSlop }
+    var screenshotMaskHexColor: String { defaultConfig.screenshotMaskHexColor }
+    var screenshotCompressionQuality: Number { defaultConfig.screenshotCompressionQuality }
+    var maxSpanNameLength: Number { defaultConfig.maxSpanNameLength }
+    var maxCheckpointNameLength: Number { defaultConfig.maxCheckpointNameLength }
+    var maxCheckpointsPerSpan: Number { defaultConfig.maxCheckpointsPerSpan }
+    var maxInMemorySignalsQueueSize: Number { defaultConfig.maxInMemorySignalsQueueSize }
+    var inMemorySignalsQueueFlushRateMs: Number { defaultConfig.inMemorySignalsQueueFlushRateMs }
+    var maxAttachmentsInBugReport: Number { defaultConfig.maxAttachmentsInBugReport }
+    var maxDescriptionLengthInBugReport: Number { defaultConfig.maxDescriptionLengthInBugReport }
+    var shakeAccelerationThreshold: Float { defaultConfig.shakeAccelerationThreshold }
+    var shakeMinTimeIntervalMs: Number { defaultConfig.shakeMinTimeIntervalMs }
+    var disallowedCustomHeaders: [String] { defaultConfig.disallowedCustomHeaders }
+    var estimatedEventSizeInKb: Number { defaultConfig.estimatedEventSizeInKb }
+    var layoutSnapshotDebounceInterval: Number { defaultConfig.layoutSnapshotDebounceInterval }
+    var accelerometerUpdateInterval: TimeInterval { defaultConfig.accelerometerUpdateInterval }
+    var lifecycleViewControllerExcludeList: [String] { defaultConfig.lifecycleViewControllerExcludeList }
+    var maxBodySizeBytes: Number { defaultConfig.maxBodySizeBytes }
+    var timeoutIntervalForRequest: TimeInterval { defaultConfig.timeoutIntervalForRequest }
+    var httpUrlBlocklist: [String] { defaultConfig.httpUrlBlocklist }
+
+    // DynamicConfig
+
+    var maxEventsInBatch: Number { dynamicConfig.maxEventsInBatch }
+    var errorReplayDurationSeconds: Number { dynamicConfig.errorReplayDurationSeconds }
+    var anrTimelineDurationSeconds: Number { dynamicConfig.anrTimelineDurationSeconds }
+    var bugReportTimelineDurationSeconds: Number { dynamicConfig.bugReportTimelineDurationSeconds }
+    var traceSamplingRate: Float { dynamicConfig.traceSamplingRate }
+    var journeySamplingRate: Float { dynamicConfig.journeySamplingRate }
+    var screenshotMaskLevel: ScreenshotMaskLevel { dynamicConfig.screenshotMaskLevel }
+    var logAutocollectEnabled: Bool { dynamicConfig.logAutocollectEnabled }
+    var logMinSeverity: Int { dynamicConfig.logMinSeverity }
+    var logIgnorePatterns: [String] { dynamicConfig.logIgnorePatterns }
+    var cpuUsageInterval: Number { dynamicConfig.cpuUsageInterval }
+    var memoryUsageInterval: Number { dynamicConfig.memoryUsageInterval }
+    var memoryUsageSessionSamplingRate: Float { dynamicConfig.memoryUsageSessionSamplingRate }
+    var errorFatalTakeScreenshot: Bool { dynamicConfig.errorFatalTakeScreenshot }
+    var errorFatalReplayEnabled: Bool { dynamicConfig.errorFatalReplayEnabled }
+    var errorUnhandledReplayEnabled: Bool { dynamicConfig.errorUnhandledReplayEnabled }
+    var errorHandledReplayEnabled: Bool { dynamicConfig.errorHandledReplayEnabled }
+    var errorFatalSamplingRate: Float { dynamicConfig.errorFatalSamplingRate }
+    var errorUnhandledSamplingRate: Float { dynamicConfig.errorUnhandledSamplingRate }
+    var errorHandledSamplingRate: Float { dynamicConfig.errorHandledSamplingRate }
+    var anrTakeScreenshot: Bool { dynamicConfig.anrTakeScreenshot }
+    var appHangThresholdMillis: Number { max(dynamicConfig.appHangThresholdMillis, DefaultConfig.minAppHangThresholdMillis) }
+    var appHangTimelineDurationSeconds: Number { dynamicConfig.appHangTimelineDurationSeconds }
+    var appHangSamplingRate: Float { dynamicConfig.appHangSamplingRate }
+    var appHangReplayEnabled: Bool { dynamicConfig.appHangReplayEnabled }
+    var launchSamplingRate: Float { dynamicConfig.launchSamplingRate }
+    var gestureClickTakeSnapshot: Bool { dynamicConfig.gestureClickTakeSnapshot }
+    var httpSamplingRate: Float { dynamicConfig.httpSamplingRate }
+    var httpDisableEventForUrls: [String] { dynamicConfig.httpDisableEventForUrls }
+    var httpTrackRequestForUrls: [String] { dynamicConfig.httpTrackRequestForUrls }
+    var httpTrackResponseForUrls: [String] { dynamicConfig.httpTrackResponseForUrls }
+    var httpBlockedHeaders: [String] { dynamicConfig.httpBlockedHeaders }
+
+    // HTTP Tracking Logic
+
+    func shouldTrackHttpUrl(url: String) -> Bool {
+        let state = httpPatternState
+
+        guard let parsedUrl = URL(string: url),
+              let host = parsedUrl.host?.lowercased() else {
+            return true
+        }
+
+        let isBlockedByDomain = httpUrlBlocklist.contains { blockedDomain in
+            host.contains(blockedDomain.lowercased())
+        }
+
+        if isBlockedByDomain {
+            return false
+        }
+
+        let range = NSRange(location: 0, length: url.utf16.count)
+
+        if state.disableEventPatterns.contains(where: {
+            $0.firstMatch(in: url, options: [], range: range) != nil
+        }) {
+            return false
+        }
+
+        return true
+    }
+
+    func shouldTrackHttpBody(url: String, contentType: String?) -> Bool {
+        // Only collect JSON bodies. Non-JSON bodies (images, protobuf, gzip, etc.)
+        // are binary and render as garbled text in the timeline.
+        guard let contentType = contentType,
+              contentType.lowercased().hasPrefix("application/json") else {
+            return false
+        }
+
+        let state = httpPatternState
+        let range = NSRange(location: 0, length: url.utf16.count)
+
+        return state.trackRequestPatterns.contains {
+            $0.firstMatch(in: url, options: [], range: range) != nil
+        } || state.trackResponsePatterns.contains {
+            $0.firstMatch(in: url, options: [], range: range) != nil
+        }
+    }
+
+    /// Mẩu tên cho thấy header mang dữ liệu xác thực hoặc định danh.
+    ///
+    /// Vì sao cần, bên cạnh hai danh sách tên đầy đủ: danh sách tên đầy đủ luôn
+    /// thiếu. Mỗi backend đặt tên riêng — `x-auth-token`, `x-csrf-token`,
+    /// `x-goog-api-key`, `x-crashlytics-developer-token`, `x-qf-session` — nên một
+    /// blocklist liệt kê chỉ đúng cho tới khi gặp dịch vụ tiếp theo. Lưới này chặn
+    /// theo ngữ nghĩa nên header mới cũng không lọt.
+    ///
+    /// Đổi lại có thể chặn nhầm vài header vô hại (ví dụ `x-session-trace-id`).
+    /// Đánh đổi đó chấp nhận được: chặn nhầm chỉ làm mất một dòng chẩn đoán, còn
+    /// lọt nhầm là ghi thẳng token của người dùng xuống đĩa. Chặn header không bao
+    /// giờ ảnh hưởng tới request thật — SDK chỉ quan sát, không sửa request.
+    private static let sensitiveHeaderFragments = [
+        "auth",
+        "token",
+        "cookie",
+        "credential",
+        "password",
+        "passwd",
+        "secret",
+        "session",
+        "signature",
+        "api-key",
+        "apikey"
+    ]
+
+    func shouldTrackHttpHeader(key: String) -> Bool {
+        let state = httpPatternState
+        let normalizedKey = key.lowercased()
+
+        let looksSensitive = Self.sensitiveHeaderFragments.contains {
+            normalizedKey.contains($0)
+        }
+
+        let blockedByDefault = defaultHttpHeadersBlocklist.contains {
+            $0.caseInsensitiveCompare(key) == .orderedSame
+        }
+
+        let blockedByConfig = state.blockedHeaders.contains {
+            $0.caseInsensitiveCompare(key) == .orderedSame
+        }
+
+        return !looksSensitive && !blockedByDefault && !blockedByConfig
+    }
+
+    func shouldDiscardLog(body: String) -> Bool {
+        let patterns = logIgnoreRegexes
+        guard !patterns.isEmpty else {
+            return false
+        }
+        let range = NSRange(location: 0, length: body.utf16.count)
+        return patterns.contains {
+            $0.firstMatch(in: body, options: [], range: range) != nil
+        }
+    }
+
+    func setMeasureUrl(url: String) {
+        lockQueue.sync {
+            let currentState = self.httpPatternState
+
+            let disablePatterns = self.buildDisableEventPatterns(configUrls: self.dynamicConfig.httpDisableEventForUrls, measureUrl: url)
+
+            self.httpPatternState = HttpPatternState(disableEventPatterns: disablePatterns,
+                                                     blocklistPatterns: currentState.blocklistPatterns,
+                                                     trackRequestPatterns: currentState.trackRequestPatterns,
+                                                     trackResponsePatterns: currentState.trackResponsePatterns,
+                                                     blockedHeaders: currentState.blockedHeaders,
+                                                     measureUrl: url)
+        }
+    }
+
+    private func buildDisableEventPatterns(configUrls: [String], measureUrl: String?) -> [NSRegularExpression] {
+        let urls = measureUrl != nil ? configUrls + [measureUrl!] : configUrls
+        return urls.map(compilePattern)
+    }
+
+    private func compilePattern(_ pattern: String) -> NSRegularExpression {
+        let escaped = NSRegularExpression.escapedPattern(for: pattern)
+        let regexPattern = escaped.replacingOccurrences(of: "\\*", with: ".*")
+
+        let finalPattern: String
+        if pattern.contains("*") {
+            finalPattern = "^" + regexPattern + "$"
+        } else {
+            // Match base URL and everything under it
+            finalPattern = "^" + regexPattern + "(/.*)?$"
+        }
+
+        do {
+            return try NSRegularExpression(pattern: finalPattern, options: [.caseInsensitive])
+        } catch {
+            return NSRegularExpression()
+        }
+    }
+
+    private func compileLogIgnorePattern(_ pattern: String) -> NSRegularExpression? {
+        return try? NSRegularExpression(pattern: pattern)
+    }
+}

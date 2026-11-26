@@ -1,0 +1,349 @@
+//
+//  BaseConfigProviderTests.swift
+//  MeasureSDKTests
+//
+//  Created by Adwin Ross on 04/09/24.
+//
+
+import XCTest
+@testable import Measure
+
+final class ConfigProviderTests: XCTestCase {
+    private var provider: BaseConfigProvider!
+    private var defaultConfig: Config!
+
+    override func setUp() {
+        super.setUp()
+        defaultConfig = Config()
+        provider = BaseConfigProvider(defaultConfig: defaultConfig)
+    }
+
+    override func tearDown() {
+        provider = nil
+        defaultConfig = nil
+        super.tearDown()
+    }
+
+    func testShouldTrackHttpUrl_returnsTrueWhenNothingBlocked() {
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "https://api.example.com/data"))
+    }
+
+    func testShouldTrackHttpUrl_exactMatchBlocked() {
+        var config = BaseDynamicConfig()
+        config = BaseDynamicConfig(
+            maxEventsInBatch: config.maxEventsInBatch,
+            errorReplayDurationSeconds: config.errorReplayDurationSeconds,
+            anrTimelineDurationSeconds: config.anrTimelineDurationSeconds,
+            bugReportTimelineDurationSeconds: config.bugReportTimelineDurationSeconds,
+            traceSamplingRate: config.traceSamplingRate,
+            journeySamplingRate: config.journeySamplingRate,
+            screenshotMaskLevel: config.screenshotMaskLevel,
+            cpuUsageInterval: config.cpuUsageInterval,
+            memoryUsageInterval: config.memoryUsageInterval,
+            errorFatalTakeScreenshot: config.errorFatalTakeScreenshot,
+            anrTakeScreenshot: config.anrTakeScreenshot,
+            launchSamplingRate: config.launchSamplingRate,
+            gestureClickTakeSnapshot: config.gestureClickTakeSnapshot,
+            httpDisableEventForUrls: ["https://api.example.com/data"],
+            httpTrackRequestForUrls: [],
+            httpTrackResponseForUrls: [],
+            httpBlockedHeaders: config.httpBlockedHeaders
+        )
+
+        provider.setDynamicConfig(config)
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://api.example.com/data"))
+    }
+
+    func testShouldTrackHttpUrl_wildcardMatch() {
+        var config = BaseDynamicConfig()
+        config = copy(config, disable: ["https://api.example.com/*"])
+
+        provider.setDynamicConfig(config)
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://api.example.com/users"))
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://api.example.com/data/123"))
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "https://other.example.com/data"))
+    }
+
+    func testWildcardInMiddle() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), disable: ["https://api.example.com/*/users"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://api.example.com/data/users"))
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "https://api.example.com/data/nomatch"))
+    }
+
+    func testMultipleWildcardPatterns() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), disable: [
+            "https://analytics.example.com/*",
+            "https://tracking.example.com/*"
+        ]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://analytics.example.com/event"))
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://tracking.example.com/ping"))
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "https://api.example.com/data"))
+    }
+
+    func testShouldTrackHttpBody_returnsFalseWhenContentTypeMissing() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), request: ["https://api.example.com/*"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpBody(url: "https://api.example.com/users", contentType: nil))
+    }
+
+    func testShouldTrackHttpBody_returnsFalseWhenContentTypeNotJson() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), request: ["https://api.example.com/*"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpBody(url: "https://api.example.com/users", contentType: "image/png"))
+    }
+
+    func testRequestBodyMatch() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), request: ["https://api.example.com/*"]))
+
+        XCTAssertTrue(provider.shouldTrackHttpBody(url: "https://api.example.com/users", contentType: "application/json"))
+        XCTAssertTrue(provider.shouldTrackHttpBody(url: "https://api.example.com/users", contentType: "application/json; charset=utf-8"))
+        XCTAssertFalse(provider.shouldTrackHttpBody(url: "https://other.example.com/data", contentType: "application/json"))
+    }
+
+    func testResponseBodyMatch() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), response: ["https://api.example.com/*"]))
+
+        XCTAssertTrue(provider.shouldTrackHttpBody(url: "https://api.example.com/users", contentType: "application/json"))
+        XCTAssertFalse(provider.shouldTrackHttpBody(url: "https://other.example.com/data", contentType: "application/json"))
+    }
+
+    func testRequestAndResponseIndependent() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(),
+                                       request: ["https://request.example.com/*"],
+                                       response: ["https://response.example.com/*"]))
+
+        XCTAssertTrue(provider.shouldTrackHttpBody(url: "https://request.example.com/data", contentType: "application/json"))
+        XCTAssertFalse(provider.shouldTrackHttpBody(url: "https://other.example.com/data", contentType: "application/json"))
+    }
+
+    func testDefaultBlockedHeaders() {
+        ["Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization", "WWW-Authenticate", "X-Api-Key"].forEach {
+            XCTAssertFalse(provider.shouldTrackHttpHeader(key: $0))
+        }
+    }
+
+    func testHeaderComparisonCaseInsensitive() {
+        XCTAssertFalse(provider.shouldTrackHttpHeader(key: "authorization"))
+    }
+
+    func testBlocksHeadersThatLookSensitiveEvenIfUnlisted() {
+        // Tên thật gặp khi chạy: không tên nào nằm trong blocklist liệt kê.
+        [
+            "x-auth-token",
+            "X-Csrf-Token",
+            "X-Goog-Api-Key",
+            "X-Crashlytics-Developer-Token",
+            "x-qf-session",
+            "X-Session-Id",
+            "X-Client-Secret",
+            "Refresh-Token",
+            "X-Request-Signature",
+            "user-password"
+        ].forEach {
+            XCTAssertFalse(provider.shouldTrackHttpHeader(key: $0), "phải chặn \($0)")
+        }
+    }
+
+    func testStillTracksHarmlessHeaders() {
+        [
+            "Content-Type",
+            "Accept",
+            "Accept-Encoding",
+            "User-Agent",
+            "Content-Length",
+            "X-Request-Id",
+            "Cache-Control",
+            "If-None-Match"
+        ].forEach {
+            XCTAssertTrue(provider.shouldTrackHttpHeader(key: $0), "không được chặn \($0)")
+        }
+    }
+
+    func testDynamicBlockedHeader() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), blockedHeaders: ["X-Custom-Header"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpHeader(key: "X-Custom-Header"))
+    }
+
+    func testSetMeasureUrlBlocksIt() {
+        let measureUrl = "https://measure.sh/api/v1"
+
+        provider.setMeasureUrl(url: measureUrl)
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: measureUrl))
+    }
+
+    func testMeasureUrlPreservedAfterDynamicConfig() {
+        let measureUrl = "https://measure.sh/api/v1"
+        provider.setMeasureUrl(url: measureUrl)
+
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), disable: ["https://analytics.example.com/*"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: measureUrl))
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://analytics.example.com/event"))
+    }
+
+    func testSetDynamicConfigUpdatesValues() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(),
+                                       traceSamplingRate: 0.5,
+                                       errorFatalTakeScreenshot: false,
+                                       cpuUsageInterval: 5000))
+
+        XCTAssertEqual(provider.traceSamplingRate, 0.5)
+        XCTAssertFalse(provider.errorFatalTakeScreenshot)
+        XCTAssertEqual(provider.cpuUsageInterval, 5000)
+    }
+
+    func testWildcardAtBeginning() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), disable: ["*/api/v1/health"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://example.com/api/v1/health"))
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://other.com/api/v1/health"))
+    }
+
+    func testWildcardInMiddleHost() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(), disable: ["https://*/api/health"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://example.com/api/health"))
+    }
+
+    func testRegexCharactersEscaped() {
+        provider.setDynamicConfig(copy(BaseDynamicConfig(),
+                                       disable: ["https://api.example.com/path?query=value"]))
+
+        XCTAssertFalse(provider.shouldTrackHttpUrl(url: "https://api.example.com/path?query=value"))
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "https://api.example.com/pathquery=value"))
+    }
+
+    func testShouldTrackHttpUrl_blocksDomainFromDefaultBlocklist() {
+        provider = BaseConfigProvider(defaultConfig: defaultConfig)
+
+        XCTAssertFalse(
+            provider.shouldTrackHttpUrl(
+                url: "https://storage.googleapis.com/msr/file.svg"
+            )
+        )
+    }
+
+    func testShouldTrackHttpUrl_domainBlocklistIsCaseInsensitive() {
+        provider = BaseConfigProvider(defaultConfig: defaultConfig)
+
+        XCTAssertFalse(
+            provider.shouldTrackHttpUrl(
+                url: "https://STORAGE.GOOGLEAPIS.COM/file"
+            )
+        )
+    }
+
+    func testShouldTrackHttpUrl_doesNotBlockOtherDomains() {
+        provider = BaseConfigProvider(defaultConfig: defaultConfig)
+
+        XCTAssertTrue(
+            provider.shouldTrackHttpUrl(
+                url: "https://api.example.com/data"
+            )
+        )
+    }
+
+    func testShouldTrackHttpUrl_malformedUrlReturnsTrue() {
+        provider = BaseConfigProvider(defaultConfig: defaultConfig)
+
+        XCTAssertTrue(provider.shouldTrackHttpUrl(url: "not a url"))
+    }
+
+    func testShouldDiscardLog_returnsFalseWhenNoPatternsConfigured() {
+        XCTAssertFalse(provider.shouldDiscardLog(body: "some log body"))
+    }
+
+    func testShouldDiscardLog_returnsTrueWhenBodyMatchesPattern() {
+        provider.setDynamicConfig(BaseDynamicConfig(logIgnorePatterns: ["secret"]))
+
+        XCTAssertTrue(provider.shouldDiscardLog(body: "this contains a secret value"))
+        XCTAssertFalse(provider.shouldDiscardLog(body: "nothing sensitive here"))
+    }
+
+    func testShouldDiscardLog_ignoresInvalidRegexPatterns() {
+        provider.setDynamicConfig(BaseDynamicConfig(logIgnorePatterns: ["[invalid(", "token"]))
+
+        XCTAssertTrue(provider.shouldDiscardLog(body: "has a token"))
+        XCTAssertFalse(provider.shouldDiscardLog(body: "no match"))
+    }
+
+    private func copy(
+        _ base: BaseDynamicConfig,
+        disable: [String] = [],
+        request: [String] = [],
+        response: [String] = [],
+        blockedHeaders: [String]? = nil,
+        traceSamplingRate: Float? = nil,
+        errorFatalTakeScreenshot: Bool? = nil,
+        cpuUsageInterval: Number? = nil
+    ) -> BaseDynamicConfig {
+        BaseDynamicConfig(
+            maxEventsInBatch: base.maxEventsInBatch,
+            errorReplayDurationSeconds: base.errorReplayDurationSeconds,
+            anrTimelineDurationSeconds: base.anrTimelineDurationSeconds,
+            bugReportTimelineDurationSeconds: base.bugReportTimelineDurationSeconds,
+            traceSamplingRate: traceSamplingRate ?? base.traceSamplingRate,
+            journeySamplingRate: base.journeySamplingRate,
+            screenshotMaskLevel: base.screenshotMaskLevel,
+            cpuUsageInterval: cpuUsageInterval ?? base.cpuUsageInterval,
+            memoryUsageInterval: base.memoryUsageInterval,
+            errorFatalTakeScreenshot: errorFatalTakeScreenshot ?? base.errorFatalTakeScreenshot,
+            anrTakeScreenshot: base.anrTakeScreenshot,
+            launchSamplingRate: base.launchSamplingRate,
+            gestureClickTakeSnapshot: base.gestureClickTakeSnapshot,
+            httpDisableEventForUrls: disable,
+            httpTrackRequestForUrls: request,
+            httpTrackResponseForUrls: response,
+            httpBlockedHeaders: blockedHeaders ?? base.httpBlockedHeaders
+        )
+    }
+    // MARK: - App Hang
+
+    func testAppHangConfig_usesDefaults() {
+        XCTAssertEqual(provider.appHangThresholdMillis, 2_000)
+        XCTAssertEqual(provider.appHangTimelineDurationSeconds, 300)
+        XCTAssertEqual(provider.appHangSamplingRate, 100)
+        XCTAssertTrue(provider.appHangReplayEnabled)
+    }
+
+    func testAppHangConfig_readsDynamicConfig() {
+        provider.setDynamicConfig(BaseDynamicConfig(appHangThresholdMillis: 5_000,
+                                                    appHangTimelineDurationSeconds: 120,
+                                                    appHangSamplingRate: 25,
+                                                    appHangReplayEnabled: false))
+
+        XCTAssertEqual(provider.appHangThresholdMillis, 5_000)
+        XCTAssertEqual(provider.appHangTimelineDurationSeconds, 120)
+        XCTAssertEqual(provider.appHangSamplingRate, 25)
+        XCTAssertFalse(provider.appHangReplayEnabled)
+    }
+
+    /// A threshold below the supported minimum would drive the detector's idle interval down far
+    /// enough to matter, so the provider raises it whatever the server sends.
+    func testAppHangThreshold_isClampedToMinimum() {
+        provider.setDynamicConfig(BaseDynamicConfig(appHangThresholdMillis: 250))
+
+        XCTAssertEqual(provider.appHangThresholdMillis, DefaultConfig.minAppHangThresholdMillis)
+        XCTAssertEqual(provider.appHangThresholdMillis, 1_000)
+    }
+
+    func testAppHangThreshold_atMinimumIsUnchanged() {
+        provider.setDynamicConfig(BaseDynamicConfig(appHangThresholdMillis: 1_000))
+
+        XCTAssertEqual(provider.appHangThresholdMillis, 1_000)
+    }
+
+    func testAppHangThreshold_zeroOrNegativeIsClamped() {
+        provider.setDynamicConfig(BaseDynamicConfig(appHangThresholdMillis: 0))
+        XCTAssertEqual(provider.appHangThresholdMillis, 1_000)
+
+        provider.setDynamicConfig(BaseDynamicConfig(appHangThresholdMillis: -1))
+        XCTAssertEqual(provider.appHangThresholdMillis, 1_000)
+    }
+}

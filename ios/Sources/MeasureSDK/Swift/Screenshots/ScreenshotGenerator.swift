@@ -1,0 +1,267 @@
+//
+//  ScreenshotGenerator.swift
+//  MeasureSDK
+//
+//  Created by Adwin Ross on 16/01/25.
+//
+
+import UIKit
+import WebKit
+import AVKit
+
+protocol ScreenshotGenerator {
+    func generate(window: UIWindow, // swiftlint:disable:this function_parameter_count
+                  name: String,
+                  storageType: AttachmentStorageType,
+                  sync: Bool,
+                  onRedactedImage: ((UIImage) -> Void)?,
+                  completion: @escaping (MsrAttachment?) -> Void)
+
+    func generate(viewController: UIViewController,
+                  completion: @escaping (MsrAttachment?) -> Void)
+}
+
+final class BaseScreenshotGenerator: ScreenshotGenerator {
+    private let configProvider: ConfigProvider
+    private let maskColor: UIColor
+    private let logger: Logger
+    private let attachmentProcessor: AttachmentProcessor
+    private let userPermissionManager: UserPermissionManager
+
+    /// Class name fragments that trigger masking via name matching at all mask levels.
+    /// Used for SwiftUI backing views that don't appear as known UIView
+    /// subclasses. _UIHostingView blanket-masks all SwiftUI content by
+    /// default — use .msrUnmask() to opt specific views out.
+    private let maskedClassNameFragments: [String] = [
+        "_UIHostingView"
+    ]
+
+    /// Class name fragments whose subtrees are skipped during traversal
+    /// to prevent crashes from accessing problematic private layers.
+    private let traversalBlocklist: [String] = {
+        var blocklist: [String] = []
+        if #available(iOS 26.0, *) {
+            blocklist.append("CameraUI.ChromeSwiftUIView")
+        }
+        return blocklist
+    }()
+
+    init(configProvider: ConfigProvider,
+         logger: Logger,
+         attachmentProcessor: AttachmentProcessor,
+         userPermissionManager: UserPermissionManager) {
+        self.configProvider = configProvider
+        self.maskColor = UIColor(hex: configProvider.screenshotMaskHexColor) ?? .black
+        self.logger = logger
+        self.attachmentProcessor = attachmentProcessor
+        self.userPermissionManager = userPermissionManager
+    }
+
+    func generate(window: UIWindow,
+                  name: String,
+                  storageType: AttachmentStorageType,
+                  sync: Bool = false,
+                  onRedactedImage: ((UIImage) -> Void)? = nil,
+                  completion: @escaping (MsrAttachment?) -> Void) {
+        if sync {
+            let runInline = { [weak self] in
+                guard let self = self, let captured = self.captureScreenshot(window: window) else {
+                    completion(nil)
+                    return
+                }
+                completion(self.processScreenshot(captured.screenshot,
+                                                  sensitiveFrames: captured.sensitiveFrames,
+                                                  storageType: storageType,
+                                                  publishRedacted: { onRedactedImage?($0) }))
+            }
+            if Thread.isMainThread {
+                runInline()
+            } else {
+                DispatchQueue.main.sync(execute: runInline)
+            }
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let captured = self.captureScreenshot(window: window) else {
+                completion(nil)
+                return
+            }
+
+            MeasureQueue.screenshotProcessor.async {
+                let attachment = self.processScreenshot(
+                    captured.screenshot,
+                    sensitiveFrames: captured.sensitiveFrames,
+                    storageType: storageType
+                ) { image in
+                    guard let onRedactedImage = onRedactedImage else { return }
+                    DispatchQueue.main.async { onRedactedImage(image) }
+                }
+                DispatchQueue.main.async { completion(attachment) }
+            }
+        }
+    }
+
+    func generate(viewController: UIViewController,
+                  completion: @escaping (MsrAttachment?) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                completion(nil)
+                return
+            }
+
+            guard let window = viewController.view.window else {
+                self.logger.log(level: .debug, message: "ScreenshotGenerator: ViewController does not have an attached window.", error: nil, data: nil)
+                completion(nil)
+                return
+            }
+
+            self.generate(window: window, name: screenshotName, storageType: .data, completion: completion)
+        }
+    }
+
+    private func captureScreenshot(window: UIWindow) -> (screenshot: UIImage, sensitiveFrames: [CGRect])? {
+        SignPost.trace(subcategory: "Attachment", label: "captureScreenshot") {
+            let level = configProvider.screenshotMaskLevel
+            let result = findSensitiveFrames(in: window,
+                                             rootView: window,
+                                             types: typesToMask(for: level),
+                                             fragments: classNameFragmentsToMask(for: level))
+
+            // Subtract exempt frames from sensitive frames
+            var sensitiveFrames = result.sensitive
+            if !result.exempt.isEmpty {
+                sensitiveFrames = sensitiveFrames.filter { frame in
+                    !result.exempt.contains { $0.intersects(frame) }
+                }
+            }
+
+            let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
+            let screenshot = renderer.image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            return (screenshot, sensitiveFrames)
+        }
+    }
+
+    private func processScreenshot(_ screenshot: UIImage,
+                                   sensitiveFrames: [CGRect],
+                                   storageType: AttachmentStorageType,
+                                   publishRedacted: (UIImage) -> Void) -> MsrAttachment? {
+        SignPost.trace(subcategory: "Attachment", label: "processScreenshot") {
+            guard let redactedImage = redactScreenshot(screenshot,
+                                                      sensitiveFrames: sensitiveFrames,
+                                                      maskColor: maskColor) else {
+                return nil
+            }
+
+            publishRedacted(redactedImage)
+
+            // Ảnh chụp màn hình đã bị gỡ khỏi bản fork này cùng với libwebp: không
+            // app nào dùng tới, mà libwebp chiếm 3.5 MB và là git submodule nên chặn
+            // đường phân phối SDK dưới dạng SPM package.
+            //
+            // Trả nil chứ không xoá cả lớp này, vì ScreenshotGenerator còn gắn vào
+            // MeasureInitializer, BugReportManager và MeasureInternal. Mọi nơi gọi
+            // đều đã xử lý nil sẵn (trước đây là nhánh mã hoá thất bại).
+            _ = (storageType, attachmentProcessor)
+            logger.log(level: .debug,
+                       message: "ScreenshotGenerator: screenshots disabled in this build.",
+                       error: nil,
+                       data: nil)
+            return nil
+        }
+    }
+
+    private func findSensitiveFrames(in view: UIView, rootView: UIView, types: [UIView.Type], fragments: [String]) -> (sensitive: [CGRect], exempt: [CGRect]) {
+        var sensitive: [CGRect] = []
+        var exempt: [CGRect] = []
+
+        let className = String(describing: type(of: view))
+
+        if MsrRedactViewHelper.shouldMask(view) {
+            sensitive.append(view.convert(view.bounds, to: rootView))
+        } else if MsrRedactViewHelper.shouldUnmask(view) {
+            // Per-instance unmask — record frame for subtraction
+            exempt.append(view.convert(view.bounds, to: rootView))
+        } else {
+            // Fall through to class-based and fragment-based checks
+            let matchesType = types.contains { view.isKind(of: $0) }
+            let matchesFragment = fragments.contains { className.contains($0) }
+
+            if matchesType || matchesFragment {
+                sensitive.append(view.convert(view.bounds, to: rootView))
+            }
+        }
+
+        // Skip subtree traversal for known crash-prone view types.
+        // The view itself is still masked above if it matched — only
+        // traversal into its children is skipped.
+        let isBlocked = traversalBlocklist.contains { className.contains($0) }
+        guard !isBlocked else {
+            return (sensitive, exempt)
+        }
+
+        for subview in view.subviews {
+            let result = findSensitiveFrames(in: subview, rootView: rootView, types: types, fragments: fragments)
+            sensitive.append(contentsOf: result.sensitive)
+            exempt.append(contentsOf: result.exempt)
+        }
+
+        return (sensitive, exempt)
+    }
+
+    private func redactScreenshot(_ screenshot: UIImage, sensitiveFrames: [CGRect], maskColor: UIColor) -> UIImage? {
+        let renderer = UIGraphicsImageRenderer(size: screenshot.size)
+        return renderer.image { context in
+            screenshot.draw(at: .zero)
+            maskColor.setFill()
+
+            for frame in sensitiveFrames {
+                context.cgContext.fill(frame)
+            }
+        }
+    }
+
+    private func classNameFragmentsToMask(for level: ScreenshotMaskLevel) -> [String] {
+        switch level {
+        case .allTextAndMedia, .allText, .allTextExceptClickable:
+            return maskedClassNameFragments + ["RCTParagraphTextView"]
+        case .sensitiveFieldsOnly:
+            return maskedClassNameFragments
+        }
+    }
+
+    private func typesToMask(for level: ScreenshotMaskLevel) -> [UIView.Type] {
+        switch level {
+        case .allTextAndMedia:
+            return [
+                UILabel.self,
+                UITextView.self,
+                UITextField.self,
+                UIImageView.self,
+                WKWebView.self,
+                AVPlayerViewController().view.classForCoder
+            ].compactMap { $0 as? UIView.Type }
+
+        case .allText:
+            return [
+                UILabel.self,
+                UITextView.self,
+                UITextField.self
+            ]
+
+        case .allTextExceptClickable:
+            return [
+                UILabel.self,
+                UITextView.self,
+                UITextField.self
+            ].filter { !$0.isSubclass(of: UIControl.self) }
+
+        case .sensitiveFieldsOnly:
+            return [
+                UITextField.self
+            ]
+        }
+    }
+}

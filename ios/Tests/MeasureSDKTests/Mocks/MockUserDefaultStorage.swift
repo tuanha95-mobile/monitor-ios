@@ -1,0 +1,115 @@
+//
+//  MockUserDefaultStorage.swift
+//  MeasureSDKTests
+//
+//  Created by Adwin Ross on 04/09/24.
+//
+
+import Foundation
+@testable import Measure
+
+final class MockUserDefaultStorage: UserDefaultStorage {
+    var installationId: String?
+    var userId: String?
+    var timestamp: Number = 0
+    var recentSessionId: String?
+    var recentSession: RecentSession?
+    var launchData: LaunchData?
+    var recentAppVersion: String?
+    var recentBuildNumber: String?
+    var eTag: String?
+    var configFetchTimestamp: Number?
+    var configCacheControl: Number?
+    var hasRunOrphanAttachmentCleanupBool: Bool = false
+
+    func getInstallationId() -> String? {
+        return installationId
+    }
+
+    func setInstallationId(_ installationId: String) {
+        self.installationId = installationId
+    }
+
+    func getUserId() -> String? {
+        return userId
+    }
+
+    func setUserId(_ userId: String?) {
+        self.userId = userId
+    }
+
+    func getRecentSession() -> RecentSession? {
+        return recentSession
+    }
+
+    func setRecentSessionEventTime(_ timestamp: Number) {
+        self.timestamp = timestamp
+        self.recentSession?.lastEventTime = timestamp
+    }
+
+    func setRecentSession(_ recentSession: RecentSession) {
+        self.recentSession = recentSession
+        self.recentSessionId = recentSession.id
+    }
+
+    func setRecentSessionCrashed() {
+        self.recentSession?.crashed = true
+    }
+
+    func setRecentLaunchData(_ launchData: LaunchData) {
+        self.launchData = launchData
+    }
+
+    func getRecentLaunchData() -> LaunchData? {
+        return launchData
+    }
+
+    func getRecentAppVersion() -> String? {
+        return recentAppVersion
+    }
+
+    func setRecentAppVersion(_ version: String) {
+        self.recentAppVersion = version
+    }
+
+    func getRecentBuildNumber() -> String? {
+        return recentBuildNumber
+    }
+
+    func setRecentBuildNumber(_ buildNumber: String) {
+        self.recentBuildNumber = buildNumber
+    }
+
+    func setConfigEtag(_ eTag: String?) {
+        self.eTag = eTag
+    }
+
+    func getConfigEtag() -> String? {
+        return eTag
+    }
+
+    func getConfigFetchTimestamp() -> Number {
+        return configFetchTimestamp ?? 0
+    }
+    
+    func setConfigFetchTimestamp(_ timestamp: Number) {
+        configFetchTimestamp = timestamp
+    }
+    
+    func getConfigCacheControl() -> Number {
+        return configCacheControl ?? 0
+    }
+    
+    func setConfigCacheControl(_ duration: Number) {
+        configCacheControl = duration
+    }
+
+    func hasRunOrphanAttachmentCleanup() -> Bool {
+        return hasRunOrphanAttachmentCleanupBool
+    }
+
+    func setHasRunOrphanAttachmentCleanup(_ value: Bool) {
+        hasRunOrphanAttachmentCleanupBool = value
+    }
+    
+}

@@ -1,0 +1,76 @@
+//
+//  SignalStore.swift
+//  Measure
+//
+//  Created by Adwin Ross on 15/01/26.
+//
+
+import Foundation
+
+protocol SignalStore {
+    func store<T: Codable>(_ event: Event<T>, needsReporting: Bool, pendingResolution: Bool)
+    func store(_ span: SpanEntity)
+}
+
+final class BaseSignalStore: SignalStore {
+    private let eventStore: EventStore
+    private let spanStore: SpanStore
+    private let sessionStore: SessionStore
+    private let logger: Logger
+    private let config: ConfigProvider
+
+    init(eventStore: EventStore,
+         spanStore: SpanStore,
+         sessionStore: SessionStore,
+         logger: Logger,
+         config: ConfigProvider) {
+        self.eventStore = eventStore
+        self.spanStore = spanStore
+        self.sessionStore = sessionStore
+        self.logger = logger
+        self.config = config
+    }
+
+    func store<T: Codable>(_ event: Event<T>, needsReporting: Bool, pendingResolution: Bool = false) {
+        let eventEntity = EventEntity(event, needsReporting: needsReporting, pendingResolution: pendingResolution)
+
+        var isErrorEvent = false
+        var collectErrorTimeline = false
+        if let severity = event.exception?.severity {
+            isErrorEvent = true
+            switch severity {
+            case .fatal:
+                collectErrorTimeline = config.errorFatalReplayEnabled
+            case .unhandled:
+                collectErrorTimeline = config.errorUnhandledReplayEnabled
+            case .handled:
+                collectErrorTimeline = config.errorHandledReplayEnabled
+            }
+        }
+        let isBugReportEvent = event.type == .bugReport
+        let collectTimeline = collectErrorTimeline || isBugReportEvent
+
+        eventStore.insertEvent(event: eventEntity)
+        if collectTimeline {
+            let timelineDuration: Number
+            if isErrorEvent {
+                timelineDuration = config.errorReplayDurationSeconds
+            } else {
+                timelineDuration = config.bugReportTimelineDurationSeconds
+            }
+            logger.log(level: .info, message: "Marking timeline for reporting", error: nil, data: nil)
+
+            eventStore.markTimelineForReporting(eventTimestampMillis: eventEntity.timestampInMillis,
+                                                durationSeconds: timelineDuration,
+                                                sessionId: eventEntity.sessionId)
+
+            return
+        }
+    }
+
+    func store(_ span: SpanEntity) {
+        guard span.isSampled else { return }
+
+        spanStore.insertSpan(span: span)
+    }
+}
